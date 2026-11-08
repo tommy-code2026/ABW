@@ -1,8 +1,10 @@
 import base64
+import heapq
 import math
 from pathlib import Path
 
 import bpy
+from mathutils import Vector
 
 
 OUTPUT = Path(__file__).resolve().parent
@@ -11,12 +13,13 @@ MATERIALS = {}
 WORKSTATIONS = []
 
 
-def material(name, color, metallic=0.0, roughness=0.7):
+def material(name, color, metallic=0.0, roughness=0.7, alpha=1.0):
     mat = bpy.data.materials.new(name)
-    mat.diffuse_color = (*color, 1.0)
+    mat.diffuse_color = (*color, alpha)
     mat.use_nodes = True
     shader = mat.node_tree.nodes.get("Principled BSDF")
-    shader.inputs["Base Color"].default_value = (*color, 1.0)
+    shader.inputs["Base Color"].default_value = (*color, alpha)
+    shader.inputs["Alpha"].default_value = alpha
     shader.inputs["Metallic"].default_value = metallic
     shader.inputs["Roughness"].default_value = roughness
     MATERIALS[name] = mat
@@ -180,16 +183,35 @@ def person(name, x, y, angle=0.0, pose="seated", shirt_name="shirt_teal"):
     return root
 
 
-def animate_walker(root, route, start_index):
+def animate_walker(root, route, start_index=0, cycle_end_frame=193):
     points = route[start_index:] + route[:start_index]
-    frames = (1, 49, 97, 145)
+    if len(points) > cycle_end_frame - 1:
+        raise ValueError("Walker route has more keyframes than its animation cycle")
+    total_distance = sum(
+        math.dist(points[index], points[(index + 1) % len(points)])
+        for index in range(len(points))
+    )
+    frames = []
+    distance = 0.0
+    previous_frame = 0
+    for index, point in enumerate(points):
+        if index:
+            distance += math.dist(points[index - 1], point)
+        frame = min(cycle_end_frame - 1,
+                    1 + round(distance / total_distance * (cycle_end_frame - 2)))
+        frame = max(frame, previous_frame + 1)
+        frames.append(frame)
+        previous_frame = frame
+
     previous_angle = None
     headings = []
     for index, (x, y) in enumerate(points):
         next_x, next_y = points[(index + 1) % len(points)]
         angle = math.atan2(-(next_x - x), next_y - y)
         if previous_angle is not None:
-            while angle < previous_angle:
+            while angle - previous_angle > math.pi:
+                angle -= 2 * math.pi
+            while angle - previous_angle < -math.pi:
                 angle += 2 * math.pi
         headings.append(angle)
         previous_angle = angle
@@ -201,9 +223,12 @@ def animate_walker(root, route, start_index):
         root.keyframe_insert(data_path="rotation_euler", frame=frame)
 
     root.location = (points[0][0], points[0][1], 0)
-    root.rotation_euler[2] = headings[0] + 2 * math.pi
-    root.keyframe_insert(data_path="location", frame=193)
-    root.keyframe_insert(data_path="rotation_euler", frame=193)
+    closing_angle = headings[0] + 2 * math.pi * round(
+        (headings[-1] - headings[0]) / (2 * math.pi)
+    )
+    root.rotation_euler[2] = closing_angle
+    root.keyframe_insert(data_path="location", frame=cycle_end_frame)
+    root.keyframe_insert(data_path="rotation_euler", frame=cycle_end_frame)
     action = root.animation_data.action
     action.name = f"{root.name}_WalkingLoop"
     channelbag = action.layers[0].strips[0].channelbag(action.slots[0])
@@ -211,6 +236,185 @@ def animate_walker(root, route, start_index):
         for key in curve.keyframe_points:
             key.interpolation = "LINEAR"
         curve.modifiers.new(type="CYCLES")
+
+
+def navigation_grid():
+    spacing = 0.1
+    x_min, y_min = -17.0, -12.0
+    columns, rows = 341, 241
+    blocked = set()
+    padding = 0.2 + spacing * math.sqrt(2) / 2
+    ignored_names = ("Open floor slab", "Floor tile joint")
+
+    bpy.context.view_layer.update()
+    for obj in bpy.context.scene.objects:
+        if (obj.type != "MESH" or obj.name.startswith("Walker_")
+                or obj.name.startswith(ignored_names) or obj.name.lower().endswith("rug")):
+            continue
+        corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+        min_x = min(point.x for point in corners) - padding
+        max_x = max(point.x for point in corners) + padding
+        min_y = min(point.y for point in corners) - padding
+        max_y = max(point.y for point in corners) + padding
+        first_column = max(0, math.ceil((min_x - x_min) / spacing))
+        last_column = min(columns - 1, math.floor((max_x - x_min) / spacing))
+        first_row = max(0, math.ceil((min_y - y_min) / spacing))
+        last_row = min(rows - 1, math.floor((max_y - y_min) / spacing))
+        for column in range(first_column, last_column + 1):
+            for row in range(first_row, last_row + 1):
+                blocked.add((column, row))
+
+    return blocked, spacing, x_min, y_min, columns, rows
+
+
+def grid_cell(point, spacing, x_min, y_min):
+    return (round((point[0] - x_min) / spacing),
+            round((point[1] - y_min) / spacing))
+
+
+def grid_point(cell, spacing, x_min, y_min):
+    return (x_min + cell[0] * spacing, y_min + cell[1] * spacing)
+
+
+def nearest_walkable(point, blocked, spacing, x_min, y_min, columns, rows):
+    column, row = grid_cell(point, spacing, x_min, y_min)
+    column = min(max(column, 0), columns - 1)
+    row = min(max(row, 0), rows - 1)
+    for radius in range(max(columns, rows)):
+        candidates = []
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if max(abs(dx), abs(dy)) != radius:
+                    continue
+                cell = (column + dx, row + dy)
+                if (0 <= cell[0] < columns and 0 <= cell[1] < rows
+                        and cell not in blocked):
+                    candidates.append(cell)
+        if candidates:
+            return min(candidates, key=lambda cell: (cell[0] - column) ** 2
+                       + (cell[1] - row) ** 2)
+    raise RuntimeError("No walkable cells available for meeting-table tour")
+
+
+def find_walk_path(start, goal, blocked, spacing, x_min, y_min, columns, rows):
+    start = nearest_walkable(start, blocked, spacing, x_min, y_min, columns, rows)
+    goal = nearest_walkable(goal, blocked, spacing, x_min, y_min, columns, rows)
+    if start == goal:
+        return [start]
+
+    def heuristic(cell):
+        dx = abs(cell[0] - goal[0])
+        dy = abs(cell[1] - goal[1])
+        return spacing * (max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy))
+
+    frontier = [(heuristic(start), 0.0, start)]
+    costs = {start: 0.0}
+    previous = {}
+    directions = ((-1, 0), (1, 0), (0, -1), (0, 1),
+                  (-1, -1), (-1, 1), (1, -1), (1, 1))
+    while frontier:
+        _, current_cost, current = heapq.heappop(frontier)
+        if current == goal:
+            break
+        if current_cost > costs[current]:
+            continue
+        for dx, dy in directions:
+            neighbor = (current[0] + dx, current[1] + dy)
+            if (not 0 <= neighbor[0] < columns or not 0 <= neighbor[1] < rows
+                    or neighbor in blocked):
+                continue
+            if dx and dy and ((current[0] + dx, current[1]) in blocked
+                              or (current[0], current[1] + dy) in blocked):
+                continue
+            next_cost = current_cost + spacing * (math.sqrt(2) if dx and dy else 1)
+            if next_cost >= costs.get(neighbor, math.inf):
+                continue
+            costs[neighbor] = next_cost
+            previous[neighbor] = current
+            heapq.heappush(frontier, (next_cost + heuristic(neighbor), next_cost, neighbor))
+
+    if goal not in previous:
+        raise RuntimeError(f"No walkable route from {start} to {goal}")
+    path = [goal]
+    while path[-1] != start:
+        path.append(previous[path[-1]])
+    return list(reversed(path))
+
+
+def simplify_walk_path(path, blocked, spacing, x_min, y_min):
+    if len(path) < 3:
+        return path
+
+    def clear_line(start, end):
+        first = grid_point(start, spacing, x_min, y_min)
+        last = grid_point(end, spacing, x_min, y_min)
+        distance = math.dist(first, last)
+        samples = max(1, math.ceil(distance / (spacing / 2)))
+        for index in range(samples + 1):
+            amount = index / samples
+            point = (first[0] + (last[0] - first[0]) * amount,
+                     first[1] + (last[1] - first[1]) * amount)
+            if grid_cell(point, spacing, x_min, y_min) in blocked:
+                return False
+        return True
+
+    result = [path[0]]
+    current_index = 0
+    while current_index < len(path) - 1:
+        next_index = len(path) - 1
+        while next_index > current_index + 1 and not clear_line(
+                path[current_index], path[next_index]):
+            next_index -= 1
+        result.append(path[next_index])
+        current_index = next_index
+    return result
+
+
+def meeting_tour_route(tables, blocked, spacing, x_min, y_min, columns, rows):
+    route = []
+    for x, y, width, depth, round_table in tables:
+        if round_table:
+            radius = width / 2 + 1.35
+            perimeter = [
+                (x + math.cos(index * math.tau / 8) * radius,
+                 y + math.sin(index * math.tau / 8) * radius)
+                for index in range(8)
+            ]
+        else:
+            half_width = width / 2 + 0.9
+            half_depth = depth / 2 + 1.25
+            perimeter = [
+                (x - half_width, y - half_depth),
+                (x + half_width, y - half_depth),
+                (x + half_width, y + half_depth),
+                (x - half_width, y + half_depth),
+            ]
+        if route:
+            current_position = grid_point(route[-1], spacing, x_min, y_min)
+            start = min(
+                range(len(perimeter)),
+                key=lambda index: math.dist(current_position, perimeter[index]),
+            )
+            perimeter = perimeter[start:] + perimeter[:start]
+        perimeter = [nearest_walkable(point, blocked, spacing, x_min, y_min,
+                                      columns, rows) for point in perimeter]
+        if not route:
+            route.append(perimeter[0])
+        current = route[-1]
+        for target in perimeter[1:] + [perimeter[0]]:
+            path = find_walk_path(grid_point(current, spacing, x_min, y_min),
+                                  grid_point(target, spacing, x_min, y_min),
+                                  blocked, spacing, x_min, y_min, columns, rows)
+            path = simplify_walk_path(path, blocked, spacing, x_min, y_min)
+            route.extend(path[1:])
+            current = target
+
+    closure = find_walk_path(grid_point(route[-1], spacing, x_min, y_min),
+                             grid_point(route[0], spacing, x_min, y_min),
+                             blocked, spacing, x_min, y_min, columns, rows)
+    closure = simplify_walk_path(closure, blocked, spacing, x_min, y_min)
+    route.extend(closure[1:-1])
+    return [grid_point(point, spacing, x_min, y_min) for point in route]
 
 
 def animate_transform(obj, keyframes, action_name, animate_rotation=False):
@@ -277,20 +481,21 @@ def animate_discussion(root, phase):
                 curve.modifiers.new(type="CYCLES")
 
 
-def workstation(x, y, prefix="Desk"):
+def workstation(x, y, prefix="Desk", include_furniture=True):
     if -4.5 <= x <= 8.5 and -10.0 <= y <= -4.5:
         return
     if x >= 8.5 and -4.5 <= y <= 0.5:
         return
     if x <= -8.0 and 0.0 <= y <= 10.0:
         return
-    box(f"{prefix} top", x, y, 0.76, 1.22, 0.68, 0.11, MATERIALS["wood"])
-    for dx in (-0.51, 0.51):
-        for dy in (-0.25, 0.25):
-            box(f"{prefix} leg", x + dx, y + dy, 0.37, 0.07, 0.07, 0.72, MATERIALS["metal"])
-    box(f"{prefix} monitor", x, y + 0.16, 1.12, 0.72, 0.075, 0.43, MATERIALS["screen"])
-    box(f"{prefix} stand", x, y + 0.15, 0.91, 0.09, 0.09, 0.24, MATERIALS["metal"])
-    chair(x, y - 0.83, prefix=f"{prefix} chair")
+    if include_furniture:
+        box(f"{prefix} top", x, y, 0.76, 1.22, 0.68, 0.11, MATERIALS["wood"])
+        for dx in (-0.51, 0.51):
+            for dy in (-0.25, 0.25):
+                box(f"{prefix} leg", x + dx, y + dy, 0.37, 0.07, 0.07, 0.72, MATERIALS["metal"])
+        box(f"{prefix} monitor", x, y + 0.16, 1.12, 0.72, 0.075, 0.43, MATERIALS["screen"])
+        box(f"{prefix} stand", x, y + 0.15, 0.91, 0.09, 0.09, 0.24, MATERIALS["metal"])
+        chair(x, y - 0.83, prefix=f"{prefix} chair")
     WORKSTATIONS.append((x, y, prefix))
 
 
@@ -313,7 +518,7 @@ def meeting_table(x, y, width, depth, count, prefix, round_table=False):
             angle = 2 * math.pi * index / count
             px = x + math.cos(angle) * (width / 2 + 0.52)
             py = y + math.sin(angle) * (width / 2 + 0.52)
-            facing = angle - math.pi / 2
+            facing = angle + math.pi / 2
             chair(px, py, facing, f"{prefix} chair")
             if index in attendees:
                 person(f"Meeting_{prefix.replace(' ', '_')}_{index}", px, py, facing,
@@ -346,6 +551,43 @@ def plant(x, y, prefix="Plant"):
         cone(f"{prefix} leaf", px, py, 1.22 + (index % 2) * 0.1, 0.17, 1.2, MATERIALS["leaf"], angle)
 
 
+def glass_partition(x1, y1, x2, y2, prefix, door_gap=0.0, door_offset=0.0):
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    angle = math.atan2(dy, dx)
+    direction_x = dx / length
+    direction_y = dy / length
+    spans = [(-length / 2, length / 2)]
+    if door_gap:
+        gap_start = door_offset - door_gap / 2
+        gap_end = door_offset + door_gap / 2
+        spans = [(-length / 2, gap_start), (gap_end, length / 2)]
+
+    panel_index = 0
+    for span_start, span_end in spans:
+        span_length = span_end - span_start
+        panel_count = max(1, math.ceil(span_length / 1.45))
+        panel_width = span_length / panel_count
+        for index in range(panel_count):
+            along = span_start + panel_width * (index + 0.5)
+            center_x = (x1 + x2) / 2 + direction_x * along
+            center_y = (y1 + y2) / 2 + direction_y * along
+            box(f"{prefix} base {panel_index}", center_x, center_y, 0.39,
+                panel_width, 0.09, 0.74, MATERIALS["partition"], angle)
+            box(f"{prefix} glass {panel_index}", center_x, center_y, 1.4,
+                panel_width - 0.08, 0.045, 1.2, MATERIALS["glass"], angle)
+            box(f"{prefix} top rail {panel_index}", center_x, center_y, 2.03,
+                panel_width, 0.1, 0.1, MATERIALS["metal"], angle)
+            for side in (-1, 1):
+                post_x, post_y = rotated_offset(
+                    center_x, center_y, side * (panel_width / 2 - 0.035), 0, angle
+                )
+                box(f"{prefix} mullion {panel_index} {side}", post_x, post_y, 1.4,
+                    0.055, 0.07, 1.28, MATERIALS["metal"], angle)
+            panel_index += 1
+
+
 def build_scene():
     WORKSTATIONS.clear()
     bpy.ops.object.select_all(action="SELECT")
@@ -355,9 +597,9 @@ def build_scene():
             bpy.data.meshes.remove(mesh)
 
     colors = {
-        "floor": ((0.69, 0.72, 0.69), 0.0, 0.9),
-        "rug": ((0.31, 0.48, 0.46), 0.0, 0.9),
-        "wood": ((0.63, 0.4, 0.22), 0.0, 0.72),
+        "floor": ((0.78, 0.79, 0.77), 0.0, 0.86),
+        "rug": ((0.58, 0.62, 0.59), 0.0, 0.9),
+        "wood": ((0.61, 0.47, 0.32), 0.0, 0.62),
         "metal": ((0.25, 0.3, 0.31), 0.45, 0.36),
         "screen": ((0.075, 0.15, 0.17), 0.1, 0.32),
         "chair_seat": ((0.12, 0.4, 0.39), 0.0, 0.68),
@@ -378,18 +620,31 @@ def build_scene():
         "shirt_mustard": ((0.82, 0.57, 0.17), 0.0, 0.8),
         "shirt_blue": ((0.24, 0.38, 0.55), 0.0, 0.8),
         "hardhat": ((0.96, 0.68, 0.08), 0.0, 0.52),
+        "partition": ((0.48, 0.53, 0.53), 0.16, 0.42),
+        "floor_joint": ((0.57, 0.59, 0.57), 0.0, 0.92),
     }
     for name, (color, metallic, roughness) in colors.items():
         material(name, color, metallic, roughness)
+    material("glass", (0.62, 0.77, 0.78), 0.16, 0.2, 0.24)
 
     box("Open floor slab", 0, 0, -0.16, 34, 23, 0.32, MATERIALS["floor"])
+    for x in range(-16, 17):
+        box(f"Floor tile joint x{x}", x, 0, 0.006, 0.014, 22.8, 0.008,
+            MATERIALS["floor_joint"])
+    for y in range(-11, 12):
+        box(f"Floor tile joint y{y}", 0, y, 0.007, 33.8, 0.014, 0.008,
+            MATERIALS["floor_joint"])
     box("Left work zone rug", -12, 0.1, 0.012, 8.3, 10.2, 0.025, MATERIALS["rug"])
     box("Upper work zone rug", -1, 8.25, 0.012, 12.2, 4.2, 0.025, MATERIALS["rug"])
     box("Right training zone rug", 11.6, 2.6, 0.012, 8.8, 8.5, 0.025, MATERIALS["rug"])
 
+    removed_personal_workstations = {(10, -9.0), (14, -9.0), (10, -7.1), (14, -7.1)}
     for row, y in enumerate((-9.0, -7.1, -5.2)):
         for column, x in enumerate((-14, -10, -6, -2, 2, 6, 10, 14)):
-            workstation(x, y, f"Open office {row + 1}-{column + 1}")
+            workstation(
+                x, y, f"Open office {row + 1}-{column + 1}",
+                include_furniture=(x, y) not in removed_personal_workstations,
+            )
 
     for row, y in enumerate((-3.2, 0.0, 3.2)):
         for column, x in enumerate((-14.4, -11.2, -8.0)):
@@ -429,7 +684,7 @@ def build_scene():
             f"ElevatorDoor{door_index + 1}_Loop",
         )
 
-    meeting_table(-5.0, 5.9, 3.5, 1.35, 6, "North conference")
+    meeting_table(-1.2, 5.9, 3.5, 1.35, 6, "North conference")
     meeting_table(4.0, 6.1, 3.0, 1.25, 6, "Design review")
     meeting_table(11.5, 6.5, 2.4, 1.2, 6, "East meeting")
     meeting_table(-6.7, -1.5, 1.7, 1.7, 4, "Team cafe", True)
@@ -441,12 +696,31 @@ def build_scene():
     meeting_table(-11.0, 5.9, 5.2, 1.7, 10, "Northwest collaboration")
     meeting_table(12.0, -4.7, 4.6, 1.6, 8, "East collaboration")
     meeting_table(1.8, -7.2, 5.8, 1.8, 10, "South collaboration")
+    box("West small meeting rug", -12.0, 0.3, 0.019, 5.4, 4.4, 0.02, MATERIALS["rug"])
+    meeting_table(-12.0, 0.3, 2.4, 1.15, 4, "West small glass meeting")
     whiteboard(-11.0, 8.45, "Northwest whiteboard")
-    whiteboard(1.8, -4.25, "South whiteboard")
     whiteboard(15.7, -4.7, "East whiteboard", -math.pi / 2)
     renovation_cart(-14.6, 4.1, "Northwest renovation cart")
     renovation_cart(15.0, -6.9, "East renovation cart")
     renovation_cart(7.8, -9.4, "South renovation cart")
+
+    for index, (x1, y1, x2, y2, prefix, door_gap) in enumerate((
+        (-15.5, 3.1, -7.0, 3.1, "Northwest south partition", 1.25),
+        (-15.5, 8.7, -7.0, 8.7, "Northwest north partition", 0),
+        (-15.5, 3.1, -15.5, 8.7, "Northwest west partition", 0),
+        (-7.0, 3.1, -7.0, 8.7, "Northwest east partition", 1.25),
+        (-15.0, -2.2, -9.0, -2.2, "West small meeting south partition", 0),
+        (-15.0, 2.8, -9.0, 2.8, "West small meeting north partition", 0),
+        (-15.0, -2.2, -15.0, 2.8, "West small meeting west partition", 0),
+        (-9.0, -2.2, -9.0, 2.8, "West small meeting east partition", 1.2),
+    )):
+        door_offset = 1.7 if prefix == "West small meeting east partition" else 0.0
+        glass_partition(x1, y1, x2, y2, prefix, door_gap, door_offset)
+
+    glass_partition(-16.5, -11.1, 16.5, -11.1, "South perimeter glazing")
+    glass_partition(-16.5, 11.1, 16.5, 11.1, "North perimeter glazing")
+    glass_partition(-16.5, -11.1, -16.5, 11.1, "West perimeter glazing")
+    glass_partition(16.5, -11.1, 16.5, 11.1, "East perimeter glazing")
 
     for row, y in enumerate((0.2, -2.0, -4.2)):
         for column, x in enumerate((9.4, 13.3)):
@@ -454,20 +728,12 @@ def build_scene():
 
     shirts = ("shirt_teal", "shirt_coral", "shirt_mustard", "shirt_blue")
     for index, (x, y, _) in enumerate(WORKSTATIONS):
-        if index % 4 == 0:
+        if index % 4 == 0 and (x, y) not in removed_personal_workstations:
             person(f"Worker_{index + 1:02d}", x, y - 0.83, shirt_name=shirts[index % len(shirts)])
-
-    route = [(-5.3, -4.3), (5.3, -4.3), (5.3, 4.35), (-5.3, 4.35)]
-    for index in range(3):
-        start = route[index]
-        walker = person(f"Walker_{index + 1:02d}", start[0], start[1], pose="walking",
-                        shirt_name=shirts[(index + 1) % len(shirts)])
-        animate_walker(walker, route, index)
 
     renovation_routes = (
         [(-14.3, 3.8), (-7.7, 3.8), (-7.7, 8.0), (-14.3, 8.0)],
         [(9.2, -6.8), (15.3, -6.8), (15.3, -2.4), (9.2, -2.4)],
-        [(-4.8, -9.6), (8.0, -9.6), (8.0, -4.7), (-4.8, -4.7)],
     )
     walker_index = 4
     for room_index, room_route in enumerate(renovation_routes):
@@ -478,18 +744,6 @@ def build_scene():
             )
             animate_walker(worker, room_route, start_index)
             walker_index += 1
-
-    for index, (x, y, angle) in enumerate(((5.35, -7.15, math.pi / 2), (-1.85, -7.0, -math.pi / 2))):
-        speaker = person(f"South_discussion_{index + 1}", x, y, angle, pose="walking",
-                         shirt_name=shirts[(index + 2) % len(shirts)])
-        animate_discussion(speaker, index * math.pi / 2)
-
-    discussion_route = [(-4.5, -9.45), (8.0, -9.45), (8.0, -4.9), (-4.5, -4.9)]
-    for index in range(2):
-        walker = person(f"Walker_{walker_index:02d}", *discussion_route[index], pose="walking",
-                        shirt_name=shirts[index])
-        animate_walker(walker, discussion_route, index)
-        walker_index += 1
 
     elevator_riders = (
         (
@@ -519,10 +773,42 @@ def build_scene():
             keyframes.append((frame, position, angle))
         animate_transform(rider, keyframes, f"{name}_ElevatorLoop", True)
 
+    meeting_tour_tables = (
+        (-11.0, 5.9, 5.2, 1.7, False),
+        (-1.2, 5.9, 3.5, 1.35, False),
+        (4.0, 6.1, 3.0, 1.25, False),
+        (11.5, 6.5, 2.4, 1.2, False),
+        (12.0, -4.7, 4.6, 1.6, False),
+        (6.7, -1.8, 1.7, 1.7, True),
+        (1.8, -7.2, 5.8, 1.8, False),
+        (-6.7, -1.5, 1.7, 1.7, True),
+        (-12.0, 0.3, 2.4, 1.15, False),
+    )
     for x, y in ((-16, 8.8), (-16, 4.7), (-16, -5.0), (-8.2, 7.2),
                  (3.0, 8.9), (8.5, 8.8), (16, 4.2), (16, -0.5),
                  (16, -7.0), (7.5, -8.6), (-3.5, -9.8)):
         plant(x, y)
+
+    meeting_tour_tables = (
+        (-11.0, 5.9, 5.2, 1.7, False),
+        (-1.2, 5.9, 3.5, 1.35, False),
+        (4.0, 6.1, 3.0, 1.25, False),
+        (11.5, 6.5, 2.4, 1.2, False),
+        (12.0, -4.7, 4.6, 1.6, False),
+        (6.7, -1.8, 1.7, 1.7, True),
+        (1.8, -7.2, 5.8, 1.8, False),
+        (-6.7, -1.5, 1.7, 1.7, True),
+        (-12.0, 0.3, 2.4, 1.15, False),
+    )
+    navigation = navigation_grid()
+    meeting_tour = meeting_tour_route(meeting_tour_tables, *navigation)
+    tour_distance = sum(math.dist(meeting_tour[index], meeting_tour[index + 1])
+                        for index in range(len(meeting_tour) - 1))
+    tour_distance += math.dist(meeting_tour[-1], meeting_tour[0])
+    tour_time_scale = min(1.0, (193 / 24) * 1.2 / tour_distance)
+    tour_walker = person("Walker_14", *meeting_tour[0], pose="walking",
+                         shirt_name="shirt_teal")
+    animate_walker(tour_walker, meeting_tour)
 
     bpy.ops.object.camera_add(location=(32, -38, 38))
     camera = bpy.context.object
@@ -560,6 +846,7 @@ def build_scene():
     scene.frame_end = 193
     scene.render.fps = 24
     scene.frame_set(1)
+    return tour_time_scale
 
 
 HTML = r'''<!doctype html>
@@ -645,7 +932,7 @@ HTML = r'''<!doctype html>
     const basePosition = new THREE.Vector3(34, 31, 38);
     const isMobile = innerWidth < 600;
     const camera = new THREE.PerspectiveCamera(isMobile ? 64 : 42, innerWidth / innerHeight, 0.1, 200);
-    const initialPosition = basePosition.clone().multiplyScalar(isMobile ? 0.94 : 0.88);
+    const initialPosition = basePosition.clone().multiplyScalar(isMobile ? 1.15 : 0.68);
     camera.position.copy(initialPosition);
     const renderer = new THREE.WebGLRenderer({antialias:true, alpha:false});
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -689,9 +976,9 @@ HTML = r'''<!doctype html>
                 scene.add(selectionRoot);
                 let activeSelection = null;
                 const labelRegions = {
-                    workstations:[[-11.2,1.8,0],[-10,1.8,7.1],[12,1.8,7.1],[2.4,1.8,-9.15]],
-                    meetings:[[-5,2,-5.9],[4,2,-6.1],[11.5,2,-6.5],[-11.2,2,-5.9],[12,2,4.7],[1.8,2,7.2],[-6.7,2,1.5],[6.7,2,1.8]],
-                    seats:[[-5,1.8,-5.9],[4,1.8,-6.1],[11.5,1.8,-6.5],[-11.2,1.8,-5.9],[12,1.8,4.7],[1.8,1.8,7.2],[-6.7,1.8,1.5],[6.7,1.8,1.8]],
+                    workstations:[[-10,1.8,7.1],[12,1.8,7.1],[2.4,1.8,-9.15]],
+                    meetings:[[-1.2,2,-5.9],[4,2,-6.1],[11.5,2,-6.5],[-11.2,2,-5.9],[12,2,4.7],[1.8,2,7.2],[-6.7,2,1.5],[6.7,2,1.8],[-12,2,-0.3]],
+                    seats:[[-1.2,1.8,-5.9],[4,1.8,-6.1],[11.5,1.8,-6.5],[-11.2,1.8,-5.9],[12,1.8,4.7],[1.8,1.8,7.2],[-6.7,1.8,1.5],[6.7,1.8,1.8],[-12,1.8,-0.3]],
                     plants:[[-16,1.8,-8.8],[-16,1.8,-4.7],[-16,1.8,5],[-8.2,1.8,-7.2],[3,1.8,-8.9],[8.5,1.8,-8.8],[16,1.8,-4.2],[16,1.8,0.5],[16,1.8,7],[7.5,1.8,8.6],[-3.5,1.8,9.8]]
                 };
                 const layerLabels = {workstations:'開放工位', meetings:'會議桌', seats:'協作座椅', plants:'植栽休憩'};
@@ -822,7 +1109,11 @@ HTML = r'''<!doctype html>
     new GLTFLoader().parse(binary, '', gltf => {
             mixer = new THREE.AnimationMixer(gltf.scene);
             gltf.animations.forEach(clip => {
-                mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
+                    const action = mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity);
+                    if (clip.name === 'Walker_14_WalkingLoop') {
+                        action.timeScale = __WALKER_TOUR_TIME_SCALE__;
+                    }
+                    action.play();
             });
             gltf.scene.updateMatrixWorld(true);
             gltf.scene.traverse(object => {
@@ -907,7 +1198,7 @@ HTML = r'''<!doctype html>
             camera.fov = mobile ? 64 : 42;
             if (modeChanged) {
                 const direction = camera.position.clone().sub(controls.target).normalize();
-                initialPosition.copy(basePosition).multiplyScalar(mobile ? 0.94 : 0.88);
+                initialPosition.copy(basePosition).multiplyScalar(mobile ? 1.15 : 0.68);
                 camera.position.copy(controls.target).add(direction.multiplyScalar(initialPosition.length()));
                 controls.update();
             }
@@ -939,7 +1230,7 @@ HTML = r'''<!doctype html>
 
 
 def main():
-    build_scene()
+    tour_time_scale = build_scene()
     bpy.ops.wm.save_as_mainfile(filepath=str(OUTPUT / "ABW16F.blend"))
     bpy.ops.object.select_all(action="DESELECT")
     for obj in bpy.context.scene.objects:
@@ -954,6 +1245,7 @@ def main():
     )
     encoded = base64.b64encode(glb_path.read_bytes()).decode("ascii")
     html = HTML.replace("__MODEL_GLB_BASE64__", encoded)
+    html = html.replace("__WALKER_TOUR_TIME_SCALE__", f"{tour_time_scale:.8f}")
     (OUTPUT / "index.html").write_text(html, encoding="utf-8")
     print(f"Created {OUTPUT / 'ABW16F.blend'}")
     print(f"Created {glb_path} ({glb_path.stat().st_size:,} bytes)")
