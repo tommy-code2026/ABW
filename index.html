@@ -11,7 +11,11 @@
     html,body{height:100%;margin:0;overflow:hidden}
     body{background:var(--paper);color:var(--ink);font-family:"Aptos","Microsoft JhengHei",sans-serif}
     .stage{position:fixed;inset:0;background-color:#eeefea;background-image:linear-gradient(rgba(42,66,61,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(42,66,61,.045) 1px,transparent 1px);background-size:28px 28px}
-    canvas{display:block;width:100%;height:100%;outline:none}
+    canvas{position:absolute;inset:0;z-index:0;display:block;width:100%;height:100%;outline:none}
+    .masthead,.badge,.panel,.controls{z-index:3}
+    .map-labels{position:absolute;inset:0;z-index:2;overflow:hidden;pointer-events:none}
+    .map-label{position:absolute;transform:translate(-50%,-50%);padding:3px 6px;border:1px solid var(--label-color);border-left-width:3px;border-radius:2px;background:rgba(37,45,43,.9);color:#fff;font-size:10px;font-weight:700;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,.2)}
+    .map-label[hidden]{display:none}
     .masthead{position:absolute;top:24px;left:28px;display:flex;align-items:flex-start;gap:14px;pointer-events:none}
     .mark{display:grid;place-items:center;width:42px;height:42px;background:var(--teal);color:white;font-size:12px;font-weight:800;border-radius:4px}
     .title h1{font-size:20px;line-height:1.15;margin:0;font-weight:750}
@@ -20,7 +24,9 @@
     .panel{position:absolute;left:28px;bottom:26px;width:min(280px,calc(100vw - 32px));padding:16px 17px 14px;border:1px solid var(--line);border-radius:4px;background:rgba(248,248,244,.92);box-shadow:0 10px 28px rgba(27,38,34,.08);backdrop-filter:blur(10px)}
     .panel h2{margin:0 0 12px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
     .legend{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;font-size:12px}
-    .legend span{display:flex;align-items:center;gap:8px;white-space:nowrap}
+    .legend button{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:0 6px;border-color:transparent;text-align:left;white-space:nowrap;font-size:12px}
+    .legend button[aria-pressed="true"]{background:#e5e9e1;border-color:#b9c5bb}
+    .legend button:focus-visible{outline:2px solid var(--teal);outline-offset:1px}
     .swatch{width:9px;height:9px;border-radius:2px;background:var(--teal)}
     .swatch.wood{background:#a16638}.swatch.coral{background:var(--coral)}.swatch.green{background:#578044}
     .note{border-top:1px solid var(--line);margin:13px 0 0;padding-top:10px;font-size:11px;color:var(--muted);line-height:1.5}
@@ -41,7 +47,12 @@
   <main class="stage" aria-label="ABW16F 互動式 3D 辦公室模型">
     <div class="masthead"><div class="mark">16F</div><div class="title"><h1>ABW16F 空間配置</h1><p>Infineon Taiwan · Taipei Office</p></div></div>
     <div class="badge">ACTIVE OFFICE / 3D VIEW</div>
-    <div class="panel"><h2>空間圖例</h2><div class="legend"><span><i class="swatch"></i>開放工位</span><span><i class="swatch wood"></i>會議桌</span><span><i class="swatch coral"></i>協作座椅</span><span><i class="swatch green"></i>植栽休憩</span></div><p class="note">依參考圖重建之示意模型；未提供工程尺寸，比例與家具位置僅供空間檢視。</p></div>
+        <div class="panel"><h2>空間圖例</h2><div class="legend">
+            <button type="button" class="legend-option" data-layer="workstations" aria-pressed="false"><i class="swatch" aria-hidden="true"></i>開放工位</button>
+            <button type="button" class="legend-option" data-layer="meetings" aria-pressed="false"><i class="swatch wood" aria-hidden="true"></i>會議桌</button>
+            <button type="button" class="legend-option" data-layer="seats" aria-pressed="false"><i class="swatch coral" aria-hidden="true"></i>協作座椅</button>
+            <button type="button" class="legend-option" data-layer="plants" aria-pressed="false"><i class="swatch green" aria-hidden="true"></i>植栽休憩</button>
+        </div><p class="note">依參考圖重建之示意模型；未提供工程尺寸，比例與家具位置僅供空間檢視。</p></div>
     <div class="controls" aria-label="視角控制">
       <button type="button" data-turn="left" title="向左旋轉" aria-label="向左旋轉">←</button>
       <button type="button" data-turn="up" title="向上旋轉" aria-label="向上旋轉">↑</button>
@@ -55,6 +66,7 @@
             </div>
     </div>
     <div id="status" class="status">正在載入 3D 模型…</div>
+    <div id="map-labels" class="map-labels" aria-hidden="true"></div>
   </main>
   <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"}}</script>
   <script type="module">
@@ -101,6 +113,140 @@
     controls.minPolarAngle = 0.12;
     controls.maxPolarAngle = Math.PI / 2.02;
     controls.update();
+                const selectionRoot = new THREE.Group();
+                const selectionColors = {workstations:'#176b66', meetings:'#a16638', seats:'#c95038', plants:'#578044'};
+                const selectionLayers = Object.fromEntries(Object.entries(selectionColors).map(([name, color]) => {
+                        const group = new THREE.Group();
+                        group.visible = false;
+                        group.name = `${name}_selection`;
+                        selectionRoot.add(group);
+                        return [name, {group, color}];
+                }));
+                scene.add(selectionRoot);
+                let activeSelection = null;
+                const labelRegions = {
+                    workstations:[[-11.2,1.8,0],[-10,1.8,7.1],[12,1.8,7.1],[2.4,1.8,-9.15]],
+                    meetings:[[-5,2,-5.9],[4,2,-6.1],[11.5,2,-6.5],[-11.2,2,-5.9],[12,2,4.7],[1.8,2,7.2],[-6.7,2,1.5],[6.7,2,1.8]],
+                    seats:[[-5,1.8,-5.9],[4,1.8,-6.1],[11.5,1.8,-6.5],[-11.2,1.8,-5.9],[12,1.8,4.7],[1.8,1.8,7.2],[-6.7,1.8,1.5],[6.7,1.8,1.8]],
+                    plants:[[-16,1.8,-8.8],[-16,1.8,-4.7],[-16,1.8,5],[-8.2,1.8,-7.2],[3,1.8,-8.9],[8.5,1.8,-8.8],[16,1.8,-4.2],[16,1.8,0.5],[16,1.8,7],[7.5,1.8,8.6],[-3.5,1.8,9.8]]
+                };
+                const layerLabels = {workstations:'開放工位', meetings:'會議桌', seats:'協作座椅', plants:'植栽休憩'};
+                const mapLabels = [];
+                const labelContainer = document.querySelector('#map-labels');
+                Object.entries(labelRegions).forEach(([layerName, positions]) => {
+                    positions.forEach(position => {
+                        const node = document.createElement('span');
+                        node.className = 'map-label';
+                        node.textContent = layerLabels[layerName];
+                        node.style.setProperty('--label-color', selectionColors[layerName]);
+                        node.hidden = true;
+                        labelContainer.append(node);
+                        mapLabels.push({node, layerName, position:new THREE.Vector3(...position)});
+                    });
+                });
+
+                function updateMapLabels() {
+                    mapLabels.forEach(label => {
+                        const projected = label.position.clone().project(camera);
+                        const onScreen = projected.z >= -1 && projected.z <= 1
+                            && Math.abs(projected.x) <= 1 && Math.abs(projected.y) <= 1;
+                        label.node.hidden = label.layerName !== activeSelection || !onScreen;
+                        if (label.node.hidden) return;
+                        label.node.style.left = `${(projected.x * 0.5 + 0.5) * innerWidth}px`;
+                        label.node.style.top = `${(-projected.y * 0.5 + 0.5) * innerHeight}px`;
+                    });
+                }
+
+        function addSelectionMarker(layerName, object) {
+            const bounds = new THREE.Box3().setFromObject(object);
+            const center = bounds.getCenter(new THREE.Vector3());
+            const width = bounds.max.x - bounds.min.x;
+            const depth = bounds.max.z - bounds.min.z;
+            const isPlant = layerName === 'plants';
+            const geometry = isPlant
+                ? new THREE.CircleGeometry(Math.max(width, depth) / 2 + 0.28, 28)
+                : new THREE.PlaneGeometry(width + (layerName === 'meetings' ? 1.8 : 0.8),
+                              depth + (layerName === 'meetings' ? 1.5 : 0.7));
+            const {group, color} = selectionLayers[layerName];
+            const fill = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+                color, transparent:true, opacity:0.48, depthWrite:false, side:THREE.DoubleSide
+            }));
+            fill.rotation.x = -Math.PI / 2;
+            fill.position.set(center.x, 0.07, center.z);
+            fill.renderOrder = 2;
+            group.add(fill);
+            const outlineColor = new THREE.Color(color).lerp(new THREE.Color('#ffffff'), 0.62);
+            const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geometry),
+                new THREE.LineBasicMaterial({color:outlineColor, transparent:true, opacity:1, depthTest:false}));
+            outline.rotation.copy(fill.rotation);
+            outline.position.copy(fill.position);
+            outline.renderOrder = 10;
+            group.add(outline);
+        }
+
+        const workstationPattern = /^(Open office \d+-\d+|West wing \d+-\d+|North wing \d+|East studio \d+-\d+) top(?:\.\d+)?$/;
+        const meetingPattern = /^(North conference|Design review|East meeting|South collaboration|East collaboration|Team cafe|Collaboration cafe) top(?:\.\d+)?$/;
+                const selectionPatterns = {
+                        workstations:/^(Open office \d+-\d+|West wing \d+-\d+|North wing \d+|East studio \d+-\d+)(?:\s|$)/,
+                        meetings:/^(North conference|Design review|East meeting|Northwest collaboration|East collaboration|South collaboration|Team cafe|Collaboration cafe)(?:\s|$)|^Meeting_/,
+                        seats:/ chair (?:back|seat|stem|foot)(?:\.\d+)?$/i,
+                        plants:/^Plant (?:pot|soil|leaf)(?:\.\d+)?$/
+                };
+                const selectionRecords = [];
+
+                function materialVariant(material, layerName) {
+                    const color = new THREE.Color(selectionColors[layerName]);
+                    const variant = material.clone();
+                    if (variant.color) variant.color.lerp(color, 0.72);
+                    if (variant.emissive) {
+                        variant.emissive.set(color);
+                        variant.emissiveIntensity = 0.55;
+                    }
+                    return variant;
+                }
+
+                function dimMaterial(material) {
+                    const variant = material.clone();
+                      if (variant.color) variant.color.multiplyScalar(0.42);
+                      if (variant.emissive) variant.emissive.multiplyScalar(0.3);
+                    return variant;
+                }
+
+                function applyMapSelection(layerName) {
+                    selectionRecords.forEach(record => {
+                        if (layerName === null) {
+                            record.object.material = record.originalMaterial;
+                            return;
+                        }
+                        if (record.categories.has(layerName)) {
+                            if (!record.highlightedMaterials.has(layerName)) {
+                                const source = record.originalMaterial;
+                                record.highlightedMaterials.set(layerName, Array.isArray(source)
+                                    ? source.map(material => materialVariant(material, layerName))
+                                    : materialVariant(source, layerName));
+                            }
+                            record.object.material = record.highlightedMaterials.get(layerName);
+                        } else {
+                            if (!record.dimmedMaterial) {
+                                const source = record.originalMaterial;
+                                record.dimmedMaterial = Array.isArray(source)
+                                    ? source.map(dimMaterial)
+                                    : dimMaterial(source);
+                            }
+                            record.object.material = record.dimmedMaterial;
+                        }
+                    });
+                }
+
+        document.querySelectorAll('.legend-option').forEach(button => button.addEventListener('click', () => {
+            activeSelection = activeSelection === button.dataset.layer ? null : button.dataset.layer;
+                        applyMapSelection(activeSelection);
+            document.querySelectorAll('.legend-option').forEach(option => {
+                const selected = option.dataset.layer === activeSelection;
+                option.setAttribute('aria-pressed', String(selected));
+                selectionLayers[option.dataset.layer].group.visible = selected;
+            });
+        }));
         const clock = new THREE.Clock();
         let animationTime = 0;
         let animationSpeed = 1;
@@ -114,10 +260,25 @@
             gltf.animations.forEach(clip => {
                 mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
             });
-      gltf.scene.traverse(object => {
+            gltf.scene.updateMatrixWorld(true);
+            gltf.scene.traverse(object => {
         if (object.isMesh) {
           object.castShadow = true;
           object.receiveShadow = true;
+                    const categories = new Set(Object.entries(selectionPatterns)
+                        .filter(([, pattern]) => pattern.test(object.name))
+                        .map(([name]) => name));
+                    selectionRecords.push({
+                        object,
+                        originalMaterial:object.material,
+                        categories,
+                        dimmedMaterial:null,
+                        highlightedMaterials:new Map()
+                    });
+                    if (workstationPattern.test(object.name)) addSelectionMarker('workstations', object);
+                    if (meetingPattern.test(object.name)) addSelectionMarker('meetings', object);
+                    if (/ chair seat(?:\.\d+)?$/i.test(object.name)) addSelectionMarker('seats', object);
+                    if (/^Plant pot(?:\.\d+)?$/.test(object.name)) addSelectionMarker('plants', object);
         }
                 if (/^Walker_\d+$/.test(object.name)) {
                     walkers.push({
@@ -130,6 +291,7 @@
                 }
       });
       scene.add(gltf.scene);
+    applyMapSelection(activeSelection);
       status.hidden = true;
     }, error => {
       status.textContent = `模型載入失敗：${error.message}`;
@@ -203,6 +365,7 @@
                 walker.rightArm.rotation.x = swing * 0.65;
             });
       controls.update();
+            updateMapLabels();
       renderer.render(scene, camera);
     });
   </script>
