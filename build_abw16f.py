@@ -213,7 +213,77 @@ def animate_walker(root, route, start_index):
         curve.modifiers.new(type="CYCLES")
 
 
+def animate_transform(obj, keyframes, action_name, animate_rotation=False):
+    for frame, position, angle in keyframes:
+        obj.location = position
+        obj.keyframe_insert(data_path="location", frame=frame)
+        if animate_rotation:
+            obj.rotation_euler[2] = angle
+            obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+
+    action = obj.animation_data.action
+    action.name = action_name
+    channelbag = action.layers[0].strips[0].channelbag(action.slots[0])
+    for curve in channelbag.fcurves:
+        for key in curve.keyframe_points:
+            key.interpolation = "LINEAR"
+        curve.modifiers.new(type="CYCLES")
+
+
+def whiteboard(x, y, prefix, rotation=0.0):
+    box(f"{prefix} frame", x, y, 1.83, 3.5, 0.13, 1.72, MATERIALS["metal"], rotation)
+    panel_x, panel_y = rotated_offset(x, y, 0, -0.09, rotation)
+    box(f"{prefix} panel", panel_x, panel_y, 1.85, 3.28, 0.045, 1.48,
+        MATERIALS["white"], rotation)
+    tray_x, tray_y = rotated_offset(x, y, 0, -0.17, rotation)
+    box(f"{prefix} marker tray", tray_x, tray_y, 1.03, 3.35, 0.12, 0.08,
+        MATERIALS["metal"], rotation)
+
+
+def renovation_worker(name, x, y, shirt_name):
+    root = person(name, x, y, pose="walking", shirt_name=shirt_name)
+    avatar_part(root, f"{name}_hardhat", (0, 0.01, 1.76), (0.34, 0.34, 0.13),
+                MATERIALS["hardhat"])
+    avatar_part(root, f"{name}_hardhat_brim", (0, 0.04, 1.71), (0.4, 0.34, 0.045),
+                MATERIALS["hardhat"])
+    return root
+
+
+def renovation_cart(x, y, prefix):
+    box(f"{prefix} lower shelf", x, y, 0.42, 0.85, 0.52, 0.09, MATERIALS["metal"])
+    box(f"{prefix} toolbox", x, y, 0.78, 0.58, 0.4, 0.58, MATERIALS["shirt_coral"])
+    box(f"{prefix} handle", x, y + 0.3, 0.91, 0.06, 0.06, 0.78, MATERIALS["metal"])
+    for dx in (-0.32, 0.32):
+        for dy in (-0.19, 0.19):
+            cylinder(f"{prefix} wheel", x + dx, y + dy, 0.18, 0.11, 0.12,
+                     MATERIALS["metal"])
+
+
+def animate_discussion(root, phase):
+    arms = [next((child for child in root.children if child.name == f"{root.name}_arm_{side}"), None)
+            for side in ("left", "right")]
+    for arm in arms:
+        if arm is not None:
+            for index, frame in enumerate((1, 49, 97, 145, 193)):
+                amount = math.sin(index * math.pi / 2 + phase) * 0.36
+                arm.rotation_euler[0] = amount
+                arm.keyframe_insert(data_path="rotation_euler", frame=frame)
+            action = arm.animation_data.action
+            action.name = f"{root.name}_{arm.name}_DiscussionLoop"
+            channelbag = action.layers[0].strips[0].channelbag(action.slots[0])
+            for curve in channelbag.fcurves:
+                for key in curve.keyframe_points:
+                    key.interpolation = "LINEAR"
+                curve.modifiers.new(type="CYCLES")
+
+
 def workstation(x, y, prefix="Desk"):
+    if -4.5 <= x <= 8.5 and -10.0 <= y <= -4.5:
+        return
+    if x >= 8.5 and -4.5 <= y <= 0.5:
+        return
+    if x <= -8.0 and 0.0 <= y <= 10.0:
+        return
     box(f"{prefix} top", x, y, 0.76, 1.22, 0.68, 0.11, MATERIALS["wood"])
     for dx in (-0.51, 0.51):
         for dy in (-0.25, 0.25):
@@ -230,6 +300,8 @@ def meeting_table(x, y, width, depth, count, prefix, round_table=False):
         "Design review": {1, 3, 5},
         "East meeting": {0, 2, 4},
         "South meeting": {1, 2, 5},
+        "South collaboration": {0, 3, 6, 9},
+        "East collaboration": {0, 2, 4, 6},
         "Team cafe": {1},
         "Collaboration cafe": {3},
     }
@@ -305,6 +377,7 @@ def build_scene():
         "shirt_coral": ((0.83, 0.31, 0.2), 0.0, 0.8),
         "shirt_mustard": ((0.82, 0.57, 0.17), 0.0, 0.8),
         "shirt_blue": ((0.24, 0.38, 0.55), 0.0, 0.8),
+        "hardhat": ((0.96, 0.68, 0.08), 0.0, 0.52),
     }
     for name, (color, metallic, roughness) in colors.items():
         material(name, color, metallic, roughness)
@@ -326,16 +399,54 @@ def build_scene():
         workstation(x, 9.15, f"North wing {column + 1}")
 
     box("Central core base", 0.2, 1.45, 0.23, 7.2, 5.4, 0.46, MATERIALS["core"])
+    elevator_doors = []
     for index, (x, y) in enumerate(((-1.6, 0.3), (0.2, 0.3), (2.0, 0.3), (-0.7, 2.5), (1.1, 2.5))):
-        box(f"Lift core {index + 1}", x, y, 1.5, 1.35, 1.55, 2.45, MATERIALS["lift"])
-        box(f"Lift door {index + 1}", x, y - 0.79, 1.35, 0.76, 0.045, 1.8, MATERIALS["screen"])
+        if index == 1:
+            box("Elevator car floor", x, y, 0.3, 1.25, 1.45, 0.14, MATERIALS["lift"])
+            box("Elevator left wall", x - 0.63, y + 0.02, 1.48, 0.09, 1.48, 2.3, MATERIALS["lift"])
+            box("Elevator right wall", x + 0.63, y + 0.02, 1.48, 0.09, 1.48, 2.3, MATERIALS["lift"])
+            box("Elevator rear wall", x, y + 0.72, 1.48, 1.25, 0.09, 2.3, MATERIALS["lift"])
+            elevator_doors = [
+                box("Elevator left sliding door", x - 0.19, y - 0.76, 1.35,
+                    0.38, 0.045, 1.8, MATERIALS["screen"]),
+                box("Elevator right sliding door", x + 0.19, y - 0.76, 1.35,
+                    0.38, 0.045, 1.8, MATERIALS["screen"]),
+            ]
+        else:
+            box(f"Lift core {index + 1}", x, y, 1.5, 1.35, 1.55, 2.45, MATERIALS["lift"])
+            box(f"Lift door {index + 1}", x, y - 0.79, 1.35, 0.76, 0.045, 1.8, MATERIALS["screen"])
+
+    door_frames = (
+        (1, -0.19), (32, -0.19), (46, -0.56), (80, -0.56), (96, -0.19),
+        (124, -0.19), (140, -0.56), (176, -0.56), (191, -0.19), (193, -0.19),
+    )
+    for door_index, door in enumerate(elevator_doors):
+        direction = -1 if door_index == 0 else 1
+        animate_transform(
+            door,
+            [(frame, (0.2 + direction * offset, 0.3 - 0.76, 1.35), 0)
+             for frame, offset in door_frames],
+            f"ElevatorDoor{door_index + 1}_Loop",
+        )
 
     meeting_table(-5.0, 5.9, 3.5, 1.35, 6, "North conference")
     meeting_table(4.0, 6.1, 3.0, 1.25, 6, "Design review")
     meeting_table(11.5, 6.5, 2.4, 1.2, 6, "East meeting")
-    meeting_table(11.2, -5.5, 2.5, 1.2, 6, "South meeting")
     meeting_table(-6.7, -1.5, 1.7, 1.7, 4, "Team cafe", True)
     meeting_table(6.7, -1.8, 1.7, 1.7, 4, "Collaboration cafe", True)
+
+    box("Northwest meeting rug", -11.2, 5.9, 0.018, 8.4, 5.4, 0.025, MATERIALS["rug"])
+    box("East meeting rug", 12.0, -4.7, 0.018, 8.2, 5.0, 0.025, MATERIALS["rug"])
+    box("South meeting rug", 1.8, -7.2, 0.018, 13.2, 5.6, 0.025, MATERIALS["rug"])
+    meeting_table(-11.0, 5.9, 5.2, 1.7, 10, "Northwest collaboration")
+    meeting_table(12.0, -4.7, 4.6, 1.6, 8, "East collaboration")
+    meeting_table(1.8, -7.2, 5.8, 1.8, 10, "South collaboration")
+    whiteboard(-11.0, 8.45, "Northwest whiteboard")
+    whiteboard(1.8, -4.25, "South whiteboard")
+    whiteboard(15.7, -4.7, "East whiteboard", -math.pi / 2)
+    renovation_cart(-14.6, 4.1, "Northwest renovation cart")
+    renovation_cart(15.0, -6.9, "East renovation cart")
+    renovation_cart(7.8, -9.4, "South renovation cart")
 
     for row, y in enumerate((0.2, -2.0, -4.2)):
         for column, x in enumerate((9.4, 13.3)):
@@ -352,6 +463,61 @@ def build_scene():
         walker = person(f"Walker_{index + 1:02d}", start[0], start[1], pose="walking",
                         shirt_name=shirts[(index + 1) % len(shirts)])
         animate_walker(walker, route, index)
+
+    renovation_routes = (
+        [(-14.3, 3.8), (-7.7, 3.8), (-7.7, 8.0), (-14.3, 8.0)],
+        [(9.2, -6.8), (15.3, -6.8), (15.3, -2.4), (9.2, -2.4)],
+        [(-4.8, -9.6), (8.0, -9.6), (8.0, -4.7), (-4.8, -4.7)],
+    )
+    walker_index = 4
+    for room_index, room_route in enumerate(renovation_routes):
+        for start_index in (0, 2):
+            worker = renovation_worker(
+                f"Walker_{walker_index:02d}", *room_route[start_index],
+                shirts[(walker_index + 1) % len(shirts)],
+            )
+            animate_walker(worker, room_route, start_index)
+            walker_index += 1
+
+    for index, (x, y, angle) in enumerate(((5.35, -7.15, math.pi / 2), (-1.85, -7.0, -math.pi / 2))):
+        speaker = person(f"South_discussion_{index + 1}", x, y, angle, pose="walking",
+                         shirt_name=shirts[(index + 2) % len(shirts)])
+        animate_discussion(speaker, index * math.pi / 2)
+
+    discussion_route = [(-4.5, -9.45), (8.0, -9.45), (8.0, -4.9), (-4.5, -4.9)]
+    for index in range(2):
+        walker = person(f"Walker_{walker_index:02d}", *discussion_route[index], pose="walking",
+                        shirt_name=shirts[index])
+        animate_walker(walker, discussion_route, index)
+        walker_index += 1
+
+    elevator_riders = (
+        (
+            "Walker_12",
+            [(1, (0.2, 0.3, -1.7)), (34, (0.2, 0.3, -1.7)), (48, (0.2, 0.3, 0)),
+             (63, (0.2, -0.35, 0)), (82, (0.2, -1.0, 0)), (99, (-0.9, -1.6, 0)),
+             (114, (-1.45, -1.0, 0)), (129, (-1.0, -0.3, 0)), (143, (0.2, -0.1, 0)),
+             (153, (0.2, 0.3, 0)), (165, (0.2, 0.3, -1.7)), (193, (0.2, 0.3, -1.7))],
+        ),
+        (
+            "Walker_13",
+            [(1, (2.1, -3.1, 0)), (99, (2.1, -3.1, 0)), (115, (1.3, -1.9, 0)),
+             (132, (0.5, -0.4, 0)), (148, (0.2, 0.3, 0)), (162, (0.2, 0.3, -1.7)),
+             (174, (0.2, 0.3, -1.7)), (184, (0.2, 0.3, 0)), (190, (1.2, -2.0, 0)),
+             (193, (2.1, -3.1, 0))],
+        ),
+    )
+    for name, points in elevator_riders:
+        rider = person(name, *points[0][1][:2], pose="walking",
+                       shirt_name="shirt_coral" if name.endswith("12") else "shirt_blue")
+        keyframes = []
+        for index, (frame, position) in enumerate(points):
+            next_position = points[(index + 1) % len(points)][1]
+            delta_x = next_position[0] - position[0]
+            delta_y = next_position[1] - position[1]
+            angle = math.atan2(-delta_x, delta_y) if delta_x or delta_y else 0
+            keyframes.append((frame, position, angle))
+        animate_transform(rider, keyframes, f"{name}_ElevatorLoop", True)
 
     for x, y in ((-16, 8.8), (-16, 4.7), (-16, -5.0), (-8.2, 7.2),
                  (3.0, 8.9), (8.5, 8.8), (16, 4.2), (16, -0.5),
@@ -425,8 +591,11 @@ HTML = r'''<!doctype html>
     .controls{position:absolute;right:28px;bottom:26px;display:flex;align-items:center;gap:6px;padding:7px;border:1px solid var(--line);border-radius:4px;background:rgba(248,248,244,.94);box-shadow:0 8px 22px rgba(27,38,34,.08)}
     button{height:36px;min-width:36px;border:1px solid transparent;border-radius:3px;background:transparent;color:var(--ink);font:inherit;font-size:17px;cursor:pointer}
     button:hover{background:#e5e9e1;border-color:#cdd5cb}
+    button:disabled{opacity:.42;cursor:not-allowed}
     button:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
     button.reset{width:auto;padding:0 12px;border-left:1px solid var(--line);font-size:12px;font-weight:650}
+    .speed-control{display:flex;align-items:center;gap:2px;margin-left:2px;padding-left:6px;border-left:1px solid var(--line)}
+    .speed-control output{min-width:38px;text-align:center;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
     .status{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);padding:10px 14px;border-radius:3px;background:#fff;color:var(--muted);font-size:13px;box-shadow:0 4px 18px #25312c20}
     .status[hidden]{display:none}
     @media(max-width:600px){.masthead{top:15px;left:15px}.badge{top:17px;right:15px}.title h1{font-size:17px}.panel{left:12px;bottom:12px;width:calc(100vw - 24px);padding:12px 13px}.panel h2{margin-bottom:8px}.legend{gap:7px 10px}.note{margin-top:9px;padding-top:8px}.controls{top:74px;right:12px;bottom:auto;padding:5px;gap:2px}.controls button{min-width:34px;height:34px}.controls button.reset{padding:0 8px}.badge{font-size:10px}}
@@ -443,6 +612,11 @@ HTML = r'''<!doctype html>
       <button type="button" data-turn="down" title="向下旋轉" aria-label="向下旋轉">↓</button>
       <button type="button" data-turn="right" title="向右旋轉" aria-label="向右旋轉">→</button>
       <button type="button" class="reset" id="reset" title="重設視角">重設</button>
+            <div class="speed-control" aria-label="動畫速度">
+                <button type="button" id="speed-down" title="減慢動畫" aria-label="減慢動畫">−</button>
+                <output id="speed-value" aria-label="目前動畫速度" aria-live="polite">1x</output>
+                <button type="button" id="speed-up" title="加快動畫" aria-label="加快動畫">+</button>
+            </div>
     </div>
     <div id="status" class="status">正在載入 3D 模型…</div>
   </main>
@@ -459,7 +633,7 @@ HTML = r'''<!doctype html>
     const basePosition = new THREE.Vector3(34, 31, 38);
     const isMobile = innerWidth < 600;
     const camera = new THREE.PerspectiveCamera(isMobile ? 64 : 42, innerWidth / innerHeight, 0.1, 200);
-    const initialPosition = basePosition.clone().multiplyScalar(isMobile ? 1.15 : 0.88);
+    const initialPosition = basePosition.clone().multiplyScalar(isMobile ? 0.94 : 0.88);
     camera.position.copy(initialPosition);
     const renderer = new THREE.WebGLRenderer({antialias:true, alpha:false});
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -492,6 +666,8 @@ HTML = r'''<!doctype html>
     controls.maxPolarAngle = Math.PI / 2.02;
     controls.update();
         const clock = new THREE.Clock();
+        let animationTime = 0;
+        let animationSpeed = 1;
         let mixer = null;
         const walkers = [];
 
@@ -543,6 +719,17 @@ HTML = r'''<!doctype html>
       controls.target.set(0, 1.2, 0);
       controls.update();
     });
+        const speedValue = document.querySelector('#speed-value');
+        const speedDown = document.querySelector('#speed-down');
+        const speedUp = document.querySelector('#speed-up');
+        function adjustAnimationSpeed(change) {
+            animationSpeed = THREE.MathUtils.clamp(animationSpeed + change, 0.25, 2);
+            speedValue.textContent = `${Number(animationSpeed.toFixed(2))}x`;
+            speedDown.disabled = animationSpeed <= 0.25;
+            speedUp.disabled = animationSpeed >= 2;
+        }
+        speedDown.addEventListener('click', () => adjustAnimationSpeed(-0.25));
+        speedUp.addEventListener('click', () => adjustAnimationSpeed(0.25));
     addEventListener('keydown', event => {
       if (event.key.startsWith('Arrow')) {
         event.preventDefault();
@@ -558,7 +745,7 @@ HTML = r'''<!doctype html>
             camera.fov = mobile ? 64 : 42;
             if (modeChanged) {
                 const direction = camera.position.clone().sub(controls.target).normalize();
-                initialPosition.copy(basePosition).multiplyScalar(mobile ? 1.15 : 0.88);
+                initialPosition.copy(basePosition).multiplyScalar(mobile ? 0.94 : 0.88);
                 camera.position.copy(controls.target).add(direction.multiplyScalar(initialPosition.length()));
                 controls.update();
             }
@@ -568,9 +755,10 @@ HTML = r'''<!doctype html>
       renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     });
         renderer.setAnimationLoop(() => {
-            const delta = clock.getDelta();
+            const delta = clock.getDelta() * animationSpeed;
+            animationTime += delta;
             mixer?.update(delta);
-            const gait = clock.elapsedTime * 8;
+            const gait = animationTime * 8;
             walkers.forEach(walker => {
                 const swing = Math.sin(gait + walker.phase) * 0.32;
                 walker.leftLeg.rotation.x = swing;
